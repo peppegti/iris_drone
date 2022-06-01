@@ -1,0 +1,8 @@
+To configure mavros parameters:
+
+1) First backup with the following command:   
+sudo mv /opt/ros/melodic/share/mavros/launch/apm_config.yaml /opt/ros/melodic/share/mavros/launch/apm_config_BKP.yaml
+
+2) Then run:
+sudo cp apm_config.yaml  /opt/ros/melodic/share/mavros/launch/apm_config.yaml
+

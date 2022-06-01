@@ -1,0 +1,10 @@
+To load ardupilot parameters from file from mavproxy console
+param load <path_to_file>/ardu_param_for_gimbal.parm
+
+AS REPORTED IN https://ardupilot.org/dev/docs/using-sitl-for-ardupilot-testing.html:
+"This only needs to be done once, after loading, the parameters are stored in the simulated EEPROM"
+
+To save ardupilot parameters to file from mavproxy console (if important changes to be shared have been done)
+param save <path_to_file>/ardu_param_for_gimbal.parm
+
+

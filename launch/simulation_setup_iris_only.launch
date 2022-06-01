@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+<launch>
+	
+	<node name="launch_sitl" pkg="iris_drone" type="launch_sitl.sh" />
+	
+	<node pkg="timed_roslaunch" type="timed_roslaunch.sh" args="10 iris_drone iris_only.gazebo.launch" name="timed_roslaunch" output="screen" />
+    <!--param name="speed" type="int" value="60" />  parametro letto da codice py TODO renderlo privato-->
+
+</launch>

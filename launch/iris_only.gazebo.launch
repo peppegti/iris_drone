@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<launch>
+	
+    <arg name="pkg_gazebo_models_uav" default="$(find iris_drone)"/>
+    
+	
+    <env name="GAZEBO_MODEL_PATH" value="models:$(arg pkg_gazebo_models_uav)/models:$(optenv GAZEBO_MODEL_PATH)"/>
+
+    <!-- to launch mavros -->
+    <include file="$(find iris_drone)/launch/apm.launch"/>
+    
+    <include file="$(find gazebo_ros)/launch/empty_world.launch" >
+		<arg name="world_name" value="$(find iris_drone)/worlds/iris_only.world"/>
+		<arg name="verbose" value="true" />
+    </include>
+	
+</launch>

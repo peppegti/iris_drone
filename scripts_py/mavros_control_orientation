@@ -1,0 +1,366 @@
+#!/usr/bin/env python
+
+##
+#
+# Control a MAV via mavros
+#
+##
+
+import rospy
+import tf
+from geometry_msgs.msg import Pose, PoseStamped, Twist, Quaternion, Point
+from mavros_msgs.msg import OverrideRCIn
+from mavros_msgs.msg import RCIn
+from mavros_msgs.srv import CommandBool
+from mavros_msgs.srv import SetMode
+from mavros_msgs.srv import CommandTOL
+from mavros_msgs.msg import MountControl
+from sensor_msgs.msg import NavSatFix
+
+import math
+from math import atan2
+import numpy as np
+import time
+import utm
+
+pi_2 = math.pi / 2.0
+
+class MavController:
+    """
+    A simple object to help interface with mavros
+    """
+    def __init__(self):
+
+        rospy.init_node("mav_control_node")
+        rospy.Subscriber("/mavros/local_position/pose", PoseStamped, self.pose_callback)
+	rospy.Subscriber("/mavros/rc/in", RCIn, self.rc_callback)
+	rospy.Subscriber("/mavros/global_position/global", NavSatFix, self.glob_callback)
+
+        self.cmd_pos_pub = rospy.Publisher("/mavros/setpoint_position/local", PoseStamped, queue_size=1)
+        self.cmd_vel_pub = rospy.Publisher("/mavros/setpoint_velocity/cmd_vel_unstamped", Twist, queue_size=1)
+        self.rc_override = rospy.Publisher("/mavros/rc/override", OverrideRCIn, queue_size=1)
+        self.gmbl_cmd_pub = rospy.Publisher("/mavros/mount_control/command", MountControl, queue_size=1)
+
+        # mode 0 = STABILIZE
+        # mode 4 = GUIDED
+        # mode 9 = LAND
+        self.mode_service = rospy.ServiceProxy('/mavros/set_mode', SetMode)
+        self.arm_service = rospy.ServiceProxy('/mavros/cmd/arming', CommandBool)
+        self.takeoff_service = rospy.ServiceProxy('/mavros/cmd/takeoff', CommandTOL)
+
+
+        self.rc = RCIn()
+        self.pose = Pose()
+        self.timestamp = rospy.Time()
+	self.gps = NavSatFix()
+
+    def glob_callback(self, msg):
+	self.gps=msg
+	#self.longitude=data.longitude
+	#self.altitude=data.altitude
+
+    def rc_callback(self, data):
+        """
+        Keep track of the current manual RC values
+        """
+        self.rc = data
+
+    def pose_callback(self, data):
+        """
+        Handle local position information
+        """
+        self.timestamp = data.header.stamp
+        self.pose = data.pose
+	#rospy.loginfo(rospy.get_caller_id() + "I heard %s", data.pose)
+
+
+    def goto(self, pose):
+        """
+        Set the given pose as a the next setpoint by sending
+        a SET_POSITION_TARGET_LOCAL_NED message. The copter must
+        be in GUIDED mode for this to work.
+        """
+        pose_stamped = PoseStamped()
+        pose_stamped.header.stamp = self.timestamp
+        pose_stamped.pose = pose
+
+        self.cmd_pos_pub.publish(pose_stamped)
+
+    def goto_xyz_rpy(self, x, y, z, ro, pi, ya):
+        pose = Pose()
+        pose.position.x = x
+        pose.position.y = y
+        pose.position.z = z
+
+        quat = tf.transformations.quaternion_from_euler(ro, pi, ya)
+
+        pose.orientation.x = quat[0]
+        pose.orientation.y = quat[1]
+        pose.orientation.z = quat[2]
+        pose.orientation.w = quat[3]
+        self.goto(pose)
+        #print(quat)
+
+
+    def set_vel(self, vx, vy, vz, avx=0, avy=0, avz=0):
+        """
+        Send comand velocities. Must be in GUIDED mode. Assumes angular
+        velocities are zero by default.
+        """
+        cmd_vel = Twist()
+
+        cmd_vel.linear.x = vx
+        cmd_vel.linear.y = vy
+        cmd_vel.linear.z = vz
+
+        cmd_vel.angular.x = avx
+        cmd_vel.angular.y = avy
+        cmd_vel.angular.z = avz
+
+        self.cmd_vel_pub.publish(cmd_vel)
+
+    def gimbal_control(self, pan,tilt):
+        gmbl_cmd = MountControl()
+        gmbl_cmd.mode = 2
+        gmbl_cmd.yaw =-(pan * 100 - 9000)#mavlink cmd defined in centi-degrees
+	gmbl_cmd.pitch = tilt * 100 #mavlink cmd defined in centi-degrees
+        self.gmbl_cmd_pub.publish(gmbl_cmd)   
+	
+
+    def arm(self):
+        """
+        Arm the throttle
+        """
+        return self.arm_service(True)
+
+    def disarm(self):
+        """
+        Disarm the throttle
+        """
+        return self.arm_service(False)
+
+    def takeoff(self, height=1.0):
+        """
+        Arm the throttle, takeoff to a few feet, and set to guided mode
+        """
+        # Set to stabilize mode for arming(
+        #mode_resp = self.mode_service(custom_mode="0")
+        mode_resp = self.mode_service(custom_mode="4")
+        self.arm()
+
+        # Set to guided mode
+        #mode_resp = self.mode_service(custom_mode="4")
+
+        # Takeoff
+        takeoff_resp = self.takeoff_service(altitude=height)
+
+        #return takeoff_resp
+        return mode_resp
+
+    def land(self):
+        """
+        Set in LAND mode, which should cause the UAV to descend directly,
+        land, and disarm.
+        """
+        resp = self.mode_service(custom_mode="9")
+        self.disarm()
+
+#NEW PART
+
+def check_distance(point_1,point_2,radius):
+	dist=math.sqrt((point_1.x-point_2.x)**2+(point_1.y-point_2.y)**2+(point_1.z-point_2.z)**2)
+	if(dist<=radius):
+		return True
+
+
+	
+def orientation_control(c,target):
+	if(c.pose.position.y-target.y==0 and c.pose.position.x-target.x==0):
+		angle_to_goal=0
+	else:
+		angle_to_goal = atan2(c.pose.position.y-target.y,c.pose.position.x-target.x)+2*1.57
+	return angle_to_goal
+
+def home(c):
+	rospy.sleep(1)
+	alt=2.0
+	rospy.sleep(5)
+	c.goto_xyz_rpy(0.0,0.0,alt,0,0,0)
+    	print("HOME")
+    	rospy.sleep(10)
+
+def input_target():
+	target=Point()
+	target.x=input("x: ")
+	target.y=input("y: ")
+	target.z=input("z: ")
+	return target 
+
+def input_positions():
+	n_points=input("Number of points to be reached: ")
+	coord_matrix=[]
+
+	for i in range(n_points):
+		print("Point: {}".format(i+1))
+		new_point=input_target()
+		coord_matrix.append(new_point)
+	return coord_matrix,n_points
+
+
+def check_position_orientation_new(point,target,radius,c):
+	check_distance(c.pose.position,point,radius)
+	c.goto_xyz_rpy(point.x,point.y,point.z,0,0,0)
+	rate = rospy.Rate(5)
+	while(check_distance(c.pose.position,point,radius)!=True):
+		angle_to_goal=orientation_control(c,target)
+		c.goto_xyz_rpy(point.x,point.y,point.z,0,0,angle_to_goal)
+		set_gimbal(c,target)
+		rate.sleep()
+	print("Set gimbal")
+	print("Point reached!")
+	rospy.sleep(5) 
+	return(True)
+
+
+def set_gimbal(c,target):
+	dist=Point()
+	dist.x=c.pose.position.x-target.x
+	dist.y=c.pose.position.y-target.y
+	dist.z=c.pose.position.z-target.z
+	mod_dist=math.sqrt(dist.x**2+dist.y**2+dist.z**2)
+	pitch=math.asin(dist.z/mod_dist)*(180/math.pi)
+	yaw=atan2(dist.y,dist.x)*(180/math.pi)+180
+	c.gimbal_control(yaw,pitch)
+
+
+def input_gps():
+	gps=NavSatFix()
+	print("Insert your target GPS coordinates: ")
+	gps.latitude=input("Latitude: ")
+	gps.longitude=input("Longitude: ")
+	gps.altitude=input("Altitude: ")
+	return gps
+
+def distance_gps(gps_target):
+	easting,northing,zone_number,zone_letter=utm.from_latlon(c.gps.latitude,c.gps.longitude)
+	easting_t,northing_t,zone_number_t,zone_letter_t=utm.from_latlon(gps_target.latitude,gps_target.longitude)
+	distance=Point()
+	distance.x=easting_t-easting
+	distance.y=northing_t-northing
+	distance.z=c.gps.altitude-gps_target.altitude
+	print(distance)
+	return distance
+
+def circle(c,radius,target):
+	print("CIRCLE MOTION: ")
+	c.goto_xyz_rpy(radius,0,2,0,0,0)
+	rospy.sleep(5)
+	rate = rospy.Rate(5)
+	for i in range(180):
+        	theta = i * 2.0 * math.pi / 180.0
+		angle_to_goal=orientation_control(c,target)
+        	x = 0.2 + 2 * math.cos(theta)
+        	y = 0.3 + 2 * math.sin(theta)
+        	z = 2;
+        	c.goto_xyz_rpy(x, y, z, 0.0, 0.0, angle_to_goal)
+		set_gimbal(c,target)
+        	rate.sleep()
+	print("CIRCLE DONE!")
+
+def snake_path(center,width,height,n,pantilt,c):
+	start=Point()
+	start.x=center.x+width/2
+	start.z=center.z-height/2
+	start.y=center.y
+	c.goto_xyz_rpy(start.x,start.y,start.z,0,0,0)
+	h=math.floor(height/n)
+	extreme=Point()
+	for i in range (n+1):
+		if(i%2==0):
+			extreme.x=c.pose.position.x-width
+		else:
+			extreme.x=c.pose.position.x+width
+		extreme.z=c.pose.position.z
+		extreme.y=c.pose.position.y
+		check_position_orientation_new(extreme,pantilt,0.2,c)
+		set_gimbal(c,pantilt)
+		print(c.pose.position)
+		extreme.x=c.pose.position.x
+		extreme.z=c.pose.position.z+h
+		extreme.y=c.pose.position.y
+		check_position_orientation_new(extreme,pantilt,0.2,c)
+		set_gimbal(c,pantilt)
+		print(c.pose.position)
+	print("Snake path complete!")
+
+
+def demo():
+	c=MavController()
+	alt=2.0
+	radius=0.2
+	c.takeoff(alt)
+	home(c)    
+	easting,northing,zone_number,zone_letter=utm.from_latlon(c.gps.latitude,c.gps.longitude)
+	print(easting,northing,zone_number,zone_letter)
+
+	center=Point()
+	center.x=1
+	center.y=1
+	center.z=4
+	Home=Point()
+	Home.x=0
+	Home.y=0
+	Home.z=2
+	snake_path(center,4,4,4,Home,c)
+
+	print("Insert your target coordinates: ")
+	target=input_target()
+	
+	r=input("Insert you circle radius: ")
+	circle(c,r,target)
+	home(c)
+
+	coord_matrix,n_points=input_positions()			
+	for i in range(n_points):
+		check_position_orientation_new(coord_matrix[i],target,radius,c)
+	home(c)
+		
+	print("Landing")
+	c.land()
+
+'''
+GPS MODE: Insert your GPS coordinates (LAT-LON-ALT)
+
+	gps=input_gps()
+	dist=distance_gps(gps)
+	print("Insert your target coordinates: ")
+	target=input_target()
+	check_position_orientation(target,dist,0.2,c)
+	set_gimbal(c,dist)
+
+
+	c=MavController()
+	alt=2.0
+	c.takeoff(alt)
+	home(c)    
+	radius=0.2
+
+
+MAVLINK MODE: Insert your Cartesian coordinates
+
+	print("Insert your target coordinates: ")
+	target=input_target()
+	coord_matrix,n_points=input_positions()
+	
+	for i in range(n_points):
+		check_position_orientation(coord_matrix[i],target,radius,c)
+		set_gimbal(c,target)
+	home(c)
+	
+	print("Landing")
+	c.land()
+'''	
+
+if __name__=="__main__":
+    demo()
+
